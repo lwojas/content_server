@@ -1,16 +1,21 @@
 services:
   content-server:
-    build: .
-    container_name: raycaster-content-server
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: content_server
+
+    restart: unless-stopped
 
     ports:
       - "4000:4000"
 
     environment:
+      NODE_ENV: production
       PORT: 4000
-      DATA_DIR: /app/data
+      HOST: 0.0.0.0
+      CONTENT_ROOT: /data
 
     volumes:
-      - /home/lwojas/docker/_apps/content_server_data:/app/data
-
-    restart: unless-stopped
+      - /home/lwojas/docker/_apps/content_server_data:/data
