@@ -11,6 +11,6 @@ services:
       DATA_DIR: /app/data
 
     volumes:
-      - /opt/raycaster-content:/app/data
+      - /home/lwojas/docker/_apps/content_server_data:/app/data
 
     restart: unless-stopped
