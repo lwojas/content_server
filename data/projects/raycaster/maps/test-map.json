@@ -1,0 +1,17 @@
+{
+  "name": "Test Map",
+  "width": 10,
+  "height": 10,
+  "cells": [
+    {
+      "x": 0,
+      "y": 0,
+      "type": "wall"
+    },
+    {
+      "x": 1,
+      "y": 0,
+      "type": "floor"
+    }
+  ]
+}

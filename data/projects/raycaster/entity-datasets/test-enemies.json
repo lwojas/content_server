@@ -1,0 +1,18 @@
+[
+  {
+    "uniqueId": "enemy-1",
+    "prefab": "enemy",
+    "position": {
+      "x": 4,
+      "y": 2
+    }
+  },
+  {
+    "uniqueId": "enemy-2",
+    "prefab": "enemy",
+    "position": {
+      "x": 8,
+      "y": 5
+    }
+  }
+]
