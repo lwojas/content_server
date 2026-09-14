@@ -1,485 +1,1272 @@
-# Raycaster Content Server
+# Content Server
 
-A small Node.js HTTP service for storing and serving the raycaster project's authored JSON content.
+A small Node.js/Express service for storing and serving JSON game content over HTTP.
 
-The server provides a stable API between content tools and the underlying storage. Clients do not need to know where JSON files are stored or how they are persisted.
+The initial purpose is to provide a central content service for the raycaster game. The editor can load and save JSON documents over the local network instead of reading and writing files directly from the game repository.
 
-The initial implementation uses the filesystem and JSON files. The storage layer is isolated behind `ContentStore`, so the backing store can be replaced later without changing the HTTP API.
+The server deliberately does **not** understand the internal structure of the game data. It stores complete JSON documents and exposes them through a simple HTTP API.
 
-## Run it
+This keeps content storage separate from the game/editor code and provides a path toward eventually deploying the content service independently of the game.
 
-### Local development
+---
 
-Requires Node.js 20 or newer.
+## Goals
 
-```bash
-npm install
-npm run dev
-```
+The server has four main goals:
 
-The server listens on:
+- Serve JSON content to the editor and, eventually, the game runtime.
+- Store content independently from the application source repository.
+- Separate content by project.
+- Keep the storage implementation replaceable so a database such as MongoDB can be introduced later without changing the HTTP API.
 
-```text
-http://localhost:4000
-```
+The current storage implementation uses JSON files on disk.
 
-The default host is `0.0.0.0`, so the server is also accessible from other machines on the local network.
+The server does **not**:
 
-For example:
+- Interpret ECS components.
+- Modify individual entities inside a document.
+- Know how maps, cells, templates, or entities work internally.
+- Transform the existing JSON structures.
+- Generate JavaScript runtime files.
+- Serve the editor application itself.
 
-```text
-http://lynn2:4000
-```
+The editor remains responsible for editing the contents of a document.
 
-### Production
+---
 
-```bash
-npm start
-```
+# Architecture
 
-The server can also be run with Docker Compose.
-
-```bash
-docker compose up -d
-```
-
-The Docker configuration exposes port `4000` and stores content under:
+The basic architecture is:
 
 ```text
-/opt/raycaster-content
+┌─────────────────────┐
+│       Editor        │
+│                     │
+│ React / Vite        │
+│                     │
+│ Loads complete JSON │
+│ Edits JSON locally  │
+│ Saves complete JSON │
+└──────────┬──────────┘
+           │
+           │ HTTP / JSON
+           ▼
+┌─────────────────────┐
+│   Content Server    │
+│                     │
+│ Express             │
+│                     │
+│ Project/document    │
+│ routing             │
+└──────────┬──────────┘
+           │
+           │ ContentStore
+           ▼
+┌─────────────────────┐
+│    JsonFileStore    │
+│                     │
+│ JSON files on disk  │
+└─────────────────────┘
 ```
 
-on the host.
-
-## Configuration
-
-The server supports the following environment variables:
-
-| Variable   | Default   | Description                       |
-| ---------- | --------- | --------------------------------- |
-| `HOST`     | `0.0.0.0` | Network interface to bind to      |
-| `PORT`     | `4000`    | HTTP port                         |
-| `DATA_DIR` | `../data` | Root directory for stored content |
-
-For Docker, `DATA_DIR` is set to:
-
-```text
-/app/data
-```
-
-with the host directory mounted at:
-
-```text
-/opt/raycaster-content
-```
-
-## Project structure
-
-Content is grouped by project:
-
-```text
-data/
-└── projects/
-    └── raycaster/
-        ├── project.json
-        ├── maps/
-        ├── entity-datasets/
-        └── templates/
-```
-
-A project contains three independent document collections:
-
-### Maps
-
-```text
-maps/
-├── testMap.json
-├── arena.json
-└── ...
-```
-
-A map contains the authored map data including its grid, cells, spawn points, spawn zones, and other map properties.
-
-### Entity datasets
-
-```text
-entity-datasets/
-├── testEntities.json
-├── arenaEntities.json
-└── ...
-```
-
-An entity dataset contains an array of authored entities.
-
-### Templates
-
-```text
-templates/
-├── alien.json
-├── marine.json
-└── ...
-```
-
-A template document contains the authored entity template definitions.
-
-The server deliberately does **not** interpret or validate these document structures. They are opaque JSON documents from the server's perspective.
-
-This keeps the content service independent from the game engine and allows the document schemas to evolve without requiring corresponding server changes.
-
-## API
-
-### Health
-
-```http
-GET /health
-```
-
-Returns:
-
-```json
-{
-  "ok": true
-}
-```
-
-### Projects
-
-List projects:
-
-```http
-GET /api/projects
-```
-
-Example response:
-
-```json
-["raycaster"]
-```
-
-Get project metadata:
-
-```http
-GET /api/projects/:projectId
-```
-
-Example:
-
-```http
-GET /api/projects/raycaster
-```
-
-Example response:
-
-```json
-{
-  "id": "raycaster",
-  "name": "Raycaster"
-}
-```
-
-### Maps
-
-List maps:
-
-```http
-GET /api/projects/:projectId/maps
-```
-
-Get a map:
-
-```http
-GET /api/projects/:projectId/maps/:mapId
-```
-
-Save a map:
-
-```http
-PUT /api/projects/:projectId/maps/:mapId
-Content-Type: application/json
-```
-
-The request body is the complete map JSON document.
-
-### Entity datasets
-
-List entity datasets:
-
-```http
-GET /api/projects/:projectId/entity-datasets
-```
-
-Get an entity dataset:
-
-```http
-GET /api/projects/:projectId/entity-datasets/:datasetId
-```
-
-Save an entity dataset:
-
-```http
-PUT /api/projects/:projectId/entity-datasets/:datasetId
-Content-Type: application/json
-```
-
-The request body is the complete entity dataset JSON document.
-
-### Templates
-
-List templates:
-
-```http
-GET /api/projects/:projectId/templates
-```
-
-Get a template:
-
-```http
-GET /api/projects/:projectId/templates/:templateId
-```
-
-Save a template:
-
-```http
-PUT /api/projects/:projectId/templates/:templateId
-Content-Type: application/json
-```
-
-The request body is the complete template JSON document.
-
-## Example requests
-
-List maps:
-
-```bash
-curl http://localhost:4000/api/projects/raycaster/maps
-```
-
-Load a map:
-
-```bash
-curl http://localhost:4000/api/projects/raycaster/maps/testMap
-```
-
-Save a map:
-
-```bash
-curl \
-  -X PUT \
-  -H "Content-Type: application/json" \
-  --data @testMap.json \
-  http://localhost:4000/api/projects/raycaster/maps/testMap
-```
-
-List templates:
-
-```bash
-curl http://localhost:4000/api/projects/raycaster/templates
-```
-
-## Storage
-
-The current implementation is filesystem-backed.
-
-JSON documents are stored directly under the project directory:
-
-```text
-projects/
-└── raycaster/
-    ├── project.json
-    ├── maps/
-    │   └── testMap.json
-    ├── entity-datasets/
-    │   └── testEntities.json
-    └── templates/
-        └── alien.json
-```
-
-Writes use a temporary file followed by an atomic rename. This avoids leaving a partially-written JSON document if the process is interrupted during a save.
-
-Document and project IDs are restricted to:
-
-```text
-[a-zA-Z0-9_-]
-```
-
-This prevents IDs from being used for path traversal.
-
-## Architecture
-
-The server has three main layers:
+The important boundary is the `ContentStore`.
 
 ```text
 HTTP API
    │
    ▼
-server.js
-   │
-   ▼
 ContentStore
    │
-   ▼
-FileContentStore
+   ├── JsonFileStore       ← current implementation
    │
-   ▼
-JSON files
+   └── future database     ← possible later implementation
 ```
 
-`ContentStore` defines the storage interface.
+The HTTP routes should not need to know whether content is stored in files, MongoDB, PostgreSQL, S3, or another backend.
 
-`FileContentStore` provides the current filesystem implementation.
+---
 
-`server.js` handles HTTP, routing, JSON requests, CORS, and error responses but does not directly manipulate content files.
+# Technology
 
-This separation is intentional.
+- Node.js
+- Express
+- JavaScript
+- ES modules
+- Docker
+- Docker Compose
 
-If the storage requirements change later, a different implementation can be added without changing the API:
+No TypeScript is used.
+
+---
+
+# Project structure
 
 ```text
-                 ┌── FileContentStore
-HTTP API → ContentStore
-                 ├── MongoContentStore
-                 ├── SqliteContentStore
-                 └── ...
+content_server/
+├── package.json
+├── package-lock.json
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
+├── .gitignore
+├── README.md
+└── src/
+    ├── server.js
+    ├── app.js
+    ├── config.js
+    │
+    ├── routes/
+    │   └── content.js
+    │
+    ├── storage/
+    │   ├── ContentStore.js
+    │   └── JsonFileStore.js
+    │
+    ├── middleware/
+    │   └── errorHandler.js
+    │
+    └── utils/
+        └── validation.js
 ```
 
-There is no need to introduce a database until the actual requirements justify one.
+### `server.js`
 
-## Clients
+Application entry point.
 
-The primary client is the ECS3D Map Editor.
+Creates the storage implementation, creates the Express application, and starts the HTTP server.
 
-The editor should communicate with the server through a small content client rather than making HTTP requests throughout the React application.
+### `app.js`
 
-Conceptually:
+Creates and configures the Express application.
+
+This contains:
+
+- JSON request parsing
+- CORS
+- health endpoint
+- API routing
+- error handling
+
+### `routes/content.js`
+
+Contains the HTTP API.
+
+The routes operate on projects, document types, and document names.
+
+### `storage/ContentStore.js`
+
+Defines the storage interface.
+
+It describes the operations required by the HTTP API without implementing how data is stored.
+
+### `storage/JsonFileStore.js`
+
+Current storage implementation.
+
+Reads and writes JSON files on disk.
+
+### `validation.js`
+
+Validates project names, document names, document types, and basic document shapes.
+
+It deliberately does not validate the internal game schemas.
+
+---
+
+# Content storage
+
+Content is stored in the directory configured by `CONTENT_ROOT`.
+
+When running locally, this defaults to:
+
+```text
+./data
+```
+
+When running in Docker, it is:
+
+```text
+/data
+```
+
+The Docker volume maps `/data` to:
+
+```text
+/home/lwojas/docker/_apps/content_server_data
+```
+
+on `lynn2`.
+
+---
+
+# Storage structure
+
+The storage directory is organised by project:
+
+```text
+content_server_data/
+└── raycaster/
+    ├── templates/
+    │   └── shared.json
+    │
+    ├── entities/
+    │   ├── testEntities.json
+    │   ├── arenaEntities.json
+    │   └── warehouseEntities.json
+    │
+    └── maps/
+        ├── testMap.json
+        ├── arena.json
+        └── warehouse.json
+```
+
+The relationship is:
+
+```text
+<project>/
+    <document type>/
+        <document name>.json
+```
+
+For example:
+
+```text
+raycaster/
+└── maps/
+    └── arena.json
+```
+
+is exposed through:
+
+```text
+/api/projects/raycaster/maps/arena
+```
+
+---
+
+# Current document types
+
+The server currently supports three document types.
+
+## Templates
+
+Directory:
+
+```text
+templates/
+```
+
+Expected top-level JSON type:
+
+```text
+object
+```
+
+Example:
+
+```json
+{
+  "player": {
+    "MovementComponent": {
+      "movable": true
+    },
+    "ItemComponent": {},
+    "InventoryComponent": {}
+  }
+}
+```
+
+The template document contains the shared entity templates used by the editor and runtime.
+
+There is currently one template document:
+
+```text
+templates/shared.json
+```
+
+The server does not impose any structure on the contents.
+
+---
+
+## Entities
+
+Directory:
+
+```text
+entities/
+```
+
+Expected top-level JSON type:
+
+```text
+array
+```
+
+An entity document contains the authored entities for a map or other piece of content.
+
+For example:
+
+```text
+entities/testEntities.json
+```
+
+The server treats the entire array as an opaque JSON document.
+
+---
+
+## Maps
+
+Directory:
+
+```text
+maps/
+```
+
+Expected top-level JSON type:
+
+```text
+object
+```
+
+A map document contains the existing map structure, including its grid, cells, spawn points, spawn zones, and other map properties.
+
+For example:
+
+```text
+maps/testMap.json
+```
+
+The server does not interpret the map structure.
+
+---
+
+# API
+
+Base URL:
+
+```text
+http://localhost:4000/api
+```
+
+On the homelab server:
+
+```text
+http://lynn2:4000/api
+```
+
+---
+
+## Health check
+
+```http
+GET /health
+```
+
+Example:
+
+```bash
+curl http://localhost:4000/health
+```
+
+Response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+This endpoint does not access content storage. It simply confirms that the HTTP service is running.
+
+---
+
+# Projects
+
+## List projects
+
+```http
+GET /api/projects
+```
+
+Example:
+
+```bash
+curl http://localhost:4000/api/projects
+```
+
+Response:
+
+```json
+{
+  "projects": ["raycaster"]
+}
+```
+
+Projects correspond directly to directories under the content root.
+
+---
+
+# Documents
+
+Each project exposes the same document-type API.
+
+The supported document types are:
+
+```text
+templates
+entities
+maps
+```
+
+---
+
+## List documents
+
+```http
+GET /api/projects/:project/:type
+```
+
+Example:
+
+```bash
+curl http://localhost:4000/api/projects/raycaster/maps
+```
+
+Response:
+
+```json
+{
+  "project": "raycaster",
+  "type": "maps",
+  "documents": ["arena", "testMap", "warehouse"]
+}
+```
+
+The returned names do not include `.json`.
+
+The editor can use this endpoint to populate its document selector.
+
+For example:
+
+```text
+Templates:
+    shared
+
+Entities:
+    testEntities
+    arenaEntities
+
+Maps:
+    testMap
+    arena
+```
+
+---
+
+# Get a document
+
+```http
+GET /api/projects/:project/:type/:name
+```
+
+Example:
+
+```bash
+curl http://localhost:4000/api/projects/raycaster/maps/testMap
+```
+
+The response is the complete JSON document.
+
+The server does not wrap the document in another object.
+
+For example, if `shared.json` contains:
+
+```json
+{
+  "player": {
+    "MovementComponent": {
+      "movable": true
+    }
+  }
+}
+```
+
+then:
+
+```http
+GET /api/projects/raycaster/templates/shared
+```
+
+returns:
+
+```json
+{
+  "player": {
+    "MovementComponent": {
+      "movable": true
+    }
+  }
+}
+```
+
+This keeps the existing editor data structures unchanged.
+
+---
+
+# Save a document
+
+```http
+PUT /api/projects/:project/:type/:name
+```
+
+The request body is the complete JSON document.
+
+Example:
+
+```bash
+curl -X PUT \
+  http://localhost:4000/api/projects/raycaster/templates/shared \
+  -H "Content-Type: application/json" \
+  -d '{
+    "player": {
+      "MovementComponent": {
+        "movable": true
+      }
+    }
+  }'
+```
+
+The server creates the required directories automatically.
+
+The resulting file is:
+
+```text
+raycaster/templates/shared.json
+```
+
+JSON is stored pretty-printed with two-space indentation.
+
+---
+
+# Document ownership
+
+The editor owns document editing.
+
+The server owns document persistence.
+
+The normal workflow is:
+
+```text
+GET document
+     │
+     ▼
+Editor loads JSON
+     │
+     ▼
+User edits document
+     │
+     ▼
+Editor updates its local document state
+     │
+     ▼
+PUT complete document
+     │
+     ▼
+Server replaces stored JSON
+```
+
+The server does not provide operations such as:
+
+```text
+POST entity
+DELETE entity
+PATCH component
+UPDATE map cell
+```
+
+This is intentional.
+
+The existing editor already understands the data structures and knows how to modify them.
+
+The server simply persists the resulting document.
+
+---
+
+# Validation
+
+The server validates the parts of the request that are relevant to storage.
+
+## Project names
+
+Allowed characters:
+
+```text
+a-z
+A-Z
+0-9
+_
+-
+```
+
+For example:
+
+```text
+raycaster
+raycaster-v2
+my_project
+```
+
+are valid.
+
+Path traversal such as:
+
+```text
+../../something
+```
+
+is rejected.
+
+---
+
+## Document names
+
+The same restrictions apply to document names.
+
+Valid:
+
+```text
+testMap
+arena
+arena_v2
+test-entities
+```
+
+Invalid:
+
+```text
+../secret
+foo/bar
+foo.json/..
+```
+
+The `.json` extension is added by the storage layer.
+
+---
+
+## Document type
+
+Only registered document types can be accessed:
+
+```text
+templates
+entities
+maps
+```
+
+An unknown type returns an error.
+
+---
+
+## Basic document shape
+
+The server performs only top-level validation.
+
+```text
+templates → object
+entities  → array
+maps      → object
+```
+
+It does not validate component schemas, entity properties, map cells, spawn points, etc.
+
+This is important because the content schemas are expected to evolve independently of the server.
+
+---
+
+# Adding another document type
+
+If a new document type is eventually required, it can be added to `config.js`.
+
+For example:
+
+```js
+documentTypes: {
+  templates: {
+    expectedShape: "object"
+  },
+
+  entities: {
+    expectedShape: "array"
+  },
+
+  maps: {
+    expectedShape: "object"
+  },
+
+  cells: {
+    expectedShape: "object"
+  }
+}
+```
+
+The same generic storage and HTTP routes can then handle:
+
+```text
+/api/projects/raycaster/cells/shared
+```
+
+without adding another route implementation.
+
+This is useful for the planned map-cell template system.
+
+---
+
+# Storage abstraction
+
+The HTTP API depends on the `ContentStore` interface rather than directly on the filesystem.
+
+The current implementation is:
+
+```text
+ContentStore
+     ▲
+     │
+JsonFileStore
+```
+
+`JsonFileStore` implements:
+
+```js
+listProjects();
+
+listDocuments(project, type);
+
+getDocument(project, type, name);
+
+saveDocument(project, type, name, data);
+```
+
+A future database implementation could provide the same methods:
+
+```text
+ContentStore
+     ▲
+     │
+MongoContentStore
+```
+
+The Express routes would not need to change.
+
+This is the main reason the storage layer is separate from the API layer.
+
+---
+
+# Local development
+
+Requirements:
+
+- Node.js
+- npm
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the server:
+
+```bash
+npm run dev
+```
+
+The development server listens on:
+
+```text
+http://localhost:4000
+```
+
+The local content directory is:
+
+```text
+./data
+```
+
+Example:
+
+```text
+content_server/
+├── data/
+│   └── raycaster/
+│       ├── templates/
+│       ├── entities/
+│       └── maps/
+└── src/
+```
+
+The `data/` directory is ignored by Git.
+
+---
+
+# Production
+
+The application is designed to run as a Docker container.
+
+Build the image:
+
+```bash
+docker compose build
+```
+
+Start it:
+
+```bash
+docker compose up -d
+```
+
+Check the container:
+
+```bash
+docker compose ps
+```
+
+View logs:
+
+```bash
+docker compose logs -f
+```
+
+Stop the container:
+
+```bash
+docker compose down
+```
+
+---
+
+# Docker configuration
+
+The container listens on port:
+
+```text
+4000
+```
+
+The host port is also:
+
+```text
+4000
+```
+
+The content directory inside the container is:
+
+```text
+/data
+```
+
+The host directory is:
+
+```text
+/home/lwojas/docker/_apps/content_server_data
+```
+
+The Docker volume therefore provides:
+
+```text
+Host:
+    /home/lwojas/docker/_apps/content_server_data
+
+        │
+        │ Docker volume
+        ▼
+
+Container:
+    /data
+```
+
+The application itself does not need to know anything about the host path.
+
+---
+
+# `lynn2` deployment
+
+The intended deployment environment is the homelab server:
+
+```text
+lynn2
+```
+
+The server is exposed on:
+
+```text
+http://lynn2:4000
+```
+
+After the repository has been cloned on `lynn2`:
+
+```bash
+cd ~/docker/_apps/content_server
+```
+
+Build and start:
+
+```bash
+docker compose up -d --build
+```
+
+Check:
+
+```bash
+curl http://localhost:4000/health
+```
+
+From another machine on the LAN:
+
+```bash
+curl http://lynn2:4000/health
+```
+
+The editor can then use:
+
+```text
+http://lynn2:4000/api
+```
+
+as its content API.
+
+---
+
+# Content backups
+
+Content is deliberately stored outside the Git repository.
+
+The application repository contains:
+
+```text
+application code
+Docker configuration
+API implementation
+storage implementation
+```
+
+The separate content volume contains:
+
+```text
+game content
+```
+
+Current content location:
+
+```text
+/home/lwojas/docker/_apps/content_server_data
+```
+
+This directory can therefore be backed up independently.
+
+The separation means:
+
+```text
+Code repository
+        │
+        ├── server code
+        ├── Docker configuration
+        └── API implementation
+
+
+Content repository / backup
+        │
+        └── content_server_data
+              └── raycaster
+                    ├── templates
+                    ├── entities
+                    └── maps
+```
+
+Rebuilding or replacing the Docker container does not remove the content.
+
+---
+
+# Editor integration
+
+The existing editor currently uses a Vite development middleware to read and write files under:
+
+```text
+scripts/data/
+```
+
+That implementation can eventually be replaced by calls to the content server.
+
+The editor will conceptually change from:
 
 ```text
 Editor
   │
   ▼
-content client
+Vite filesystem middleware
+  │
+  ▼
+scripts/data/
+```
+
+to:
+
+```text
+Editor
+  │
+  ▼
+HTTP
   │
   ▼
 Content Server
   │
   ▼
-JSON files
+content_server_data/
 ```
 
-The editor exposes operations such as:
+The document structures themselves do not need to change.
 
-```js
-content.maps.list();
-content.maps.get(name);
-content.maps.save(name, data);
-
-content.entities.list();
-content.entities.get(name);
-content.entities.save(name, data);
-
-content.templates.list();
-content.templates.get(name);
-content.templates.save(name, data);
-```
-
-The editor therefore does not need to know whether the content is stored locally, on another machine, or in a future database implementation.
-
-## CORS
-
-The server currently allows cross-origin requests:
+The existing editor model of having one independent document for each type remains:
 
 ```text
-Access-Control-Allow-Origin: *
+Templates document
+Entities document
+Map document
 ```
 
-This is intentional because the editor may run from a different origin, for example:
+The editor continues to load and save complete documents.
+
+---
+
+# Runtime integration
+
+The current runtime still consumes the generated JavaScript data used by the game.
+
+The content server does not currently change that workflow.
+
+The intended future architecture is:
 
 ```text
-Editor:
-http://localhost:5183
-
-Content server:
-http://lynn2:4000
+Content Server
+      │
+      │ JSON
+      ▼
+Runtime loader
+      │
+      ▼
+Game data
 ```
 
-The content server is intended for the trusted local development/LAN environment.
+That integration should be implemented separately.
 
-It should not be exposed directly to the public internet without adding appropriate authentication, authorization, and network restrictions.
+This server task intentionally does not modify the runtime data structures or runtime launcher.
 
-## Responsibilities
+---
 
-The content server is deliberately narrow.
+# Future content model
 
-It is responsible for:
+The current structure is intentionally compatible with additional reusable content types.
 
-- storing authored JSON
-- loading authored JSON
-- listing available documents
-- grouping documents by project
-- providing a stable HTTP API
-- protecting filesystem paths from traversal
-- performing atomic JSON writes
-
-It is **not** responsible for:
-
-- validating game-specific schemas
-- running game logic
-- compiling game data
-- knowing about ECS components
-- knowing about Phaser
-- rendering maps
-- editing documents
-- generating runtime JavaScript
-- deciding whether content is valid for a particular game mode
-
-Those responsibilities belong to the clients or game tooling.
-
-## Current project relationship
-
-The original editor stored JSON directly inside the raycaster repository:
+For example, reusable map-cell templates could eventually be stored as:
 
 ```text
 raycaster/
-└── scripts/
-    └── data/
-        ├── maps/
-        ├── entities/
-        └── templates/
+├── templates/
+│   └── shared.json
+│
+├── entities/
+│   ├── arena.json
+│   └── warehouse.json
+│
+├── maps/
+│   ├── arena.json
+│   └── warehouse.json
+│
+└── cells/
+    └── shared.json
 ```
 
-The content server moves that persistence responsibility out of the editor:
+The existing documents remain independent.
+
+A future map can reference a cell template without requiring the server to understand what that reference means.
+
+That interpretation belongs to the editor/runtime.
+
+---
+
+# Design principles
+
+## Keep documents independent
+
+Templates, entities, and maps are separate documents.
+
+Do not merge them into a single server-side representation.
+
+---
+
+## Keep the server schema-light
+
+The server should know:
 
 ```text
-raycaster-content-server/
-└── data/
-    └── projects/
-        └── raycaster/
-            ├── maps/
-            ├── entity-datasets/
-            └── templates/
+project
+document type
+document name
+JSON
 ```
 
-This allows multiple clients to work with the same content.
-
-For example:
+It should not know:
 
 ```text
-MacBook
-  └── ECS3D Map Editor
-          │
-          │ HTTP
-          ▼
-       lynn2
-          │
-          ▼
-  Raycaster Content Server
-          │
-          ▼
-       JSON files
-          ▲
-          │
-          │ HTTP
-          │
-Son's PC / other editor
+MovementComponent
+InventoryComponent
+spawnPoints
+wall
+floor
+ceiling
+entities
+doors
+weapons
 ```
 
-The editor and content server can therefore be developed and deployed independently.
+Those belong to the game/editor domain.
+
+---
+
+## Replace whole documents
+
+The server stores complete documents.
+
+This keeps persistence simple and means the editor remains the authority for document manipulation.
+
+---
+
+## Keep storage replaceable
+
+The HTTP layer should depend on:
+
+```text
+ContentStore
+```
+
+rather than:
+
+```text
+fs
+```
+
+This allows the storage mechanism to change later without redesigning the API.
+
+---
+
+## Keep content separate from application code
+
+The Docker image contains the application.
+
+The mounted volume contains the content.
+
+This allows the application and content to be deployed, backed up, and versioned independently.
+
+---
+
+# API summary
+
+| Method | Endpoint                             | Purpose             |
+| ------ | ------------------------------------ | ------------------- |
+| `GET`  | `/health`                            | Check server status |
+| `GET`  | `/api/projects`                      | List projects       |
+| `GET`  | `/api/projects/:project/:type`       | List documents      |
+| `GET`  | `/api/projects/:project/:type/:name` | Load document       |
+| `PUT`  | `/api/projects/:project/:type/:name` | Save document       |
+
+Current document types:
+
+```text
+templates
+entities
+maps
+```
+
+---
+
+# Example complete content tree
+
+A populated installation might look like:
+
+```text
+/home/lwojas/docker/_apps/content_server_data/
+└── raycaster/
+    │
+    ├── templates/
+    │   └── shared.json
+    │
+    ├── entities/
+    │   ├── testEntities.json
+    │   ├── arenaEntities.json
+    │   └── warehouseEntities.json
+    │
+    └── maps/
+        ├── testMap.json
+        ├── arena.json
+        └── warehouse.json
+```
+
+The server sees these as:
+
+```text
+Project: raycaster
+
+Templates:
+    shared
+
+Entities:
+    testEntities
+    arenaEntities
+    warehouseEntities
+
+Maps:
+    testMap
+    arena
+    warehouse
+```
+
+No additional indexing database or metadata file is required.
+
+The directory structure itself is the index.
+
+---
+
+# Current scope
+
+This server intentionally provides the smallest useful foundation for centralised game content.
+
+Included:
+
+- Express HTTP API
+- Project separation
+- Template documents
+- Entity documents
+- Map documents
+- JSON file storage
+- Storage abstraction
+- Basic validation
+- CORS
+- Docker deployment
+- Persistent host-mounted storage
+- Health endpoint
+
+Not currently included:
+
+- Authentication
+- User accounts
+- Permissions
+- Revision history
+- Conflict resolution
+- Locking
+- Content publishing workflow
+- Database storage
+- Runtime integration
+- Asset storage
+- Individual entity/component APIs
+- Schema validation of game-specific JSON
+
+These can be added independently if they become necessary.
