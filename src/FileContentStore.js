@@ -3,102 +3,119 @@ import path from "node:path";
 
 import { ContentStore } from "./ContentStore.js";
 
-function isSafeId(value) {
-  return /^[a-zA-Z0-9_-]+$/.test(value);
-}
+const SAFE_ID = /^[a-zA-Z0-9_-]+$/;
 
-function assertSafeId(value, label) {
-  if (!isSafeId(value)) {
-    throw new Error(`Invalid ${label}: "${value}"`);
-  }
-}
-
-async function readJson(filePath) {
-  const raw = await fs.readFile(filePath, "utf8");
-  return JSON.parse(raw);
-}
-
-async function writeJsonAtomic(filePath, data) {
-  const directory = path.dirname(filePath);
-
-  await fs.mkdir(directory, {
-    recursive: true,
-  });
-
-  const tempPath = `${filePath}.tmp`;
-
-  await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-
-  await fs.rename(tempPath, filePath);
-}
-
-async function fileExists(filePath) {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
+function assertSafeId(id, label = "ID") {
+  if (!SAFE_ID.test(id)) {
+    throw new Error(`Invalid ${label}: "${id}"`);
   }
 }
 
 export class FileContentStore extends ContentStore {
-  constructor(rootDir) {
+  constructor(dataDir) {
     super();
-
-    this.rootDir = rootDir;
-    this.projectsDir = path.join(rootDir, "projects");
+    this.dataDir = dataDir;
   }
 
-  getProjectDir(projectId) {
+  projectDir(projectId) {
     assertSafeId(projectId, "project ID");
-
-    return path.join(this.projectsDir, projectId);
+    return path.join(this.dataDir, "projects", projectId);
   }
 
-  getProjectFile(projectId) {
-    return path.join(this.getProjectDir(projectId), "project.json");
+  collectionDir(projectId, collection) {
+    return path.join(this.projectDir(projectId), collection);
   }
 
-  getCollectionDir(projectId, collection) {
-    return path.join(this.getProjectDir(projectId), collection);
+  documentPath(projectId, collection, id) {
+    assertSafeId(id, "document ID");
+    return path.join(this.collectionDir(projectId, collection), `${id}.json`);
   }
 
-  getDocumentFile(projectId, collection, documentId) {
-    assertSafeId(documentId, "document ID");
+  async readJson(filePath) {
+    try {
+      const content = await fs.readFile(filePath, "utf8");
+      return JSON.parse(content);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return null;
+      }
 
-    return path.join(
-      this.getCollectionDir(projectId, collection),
-      `${documentId}.json`,
-    );
+      throw error;
+    }
+  }
+
+  async writeJson(filePath, data) {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+    const tempPath = `${filePath}.tmp`;
+
+    await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+
+    await fs.rename(tempPath, filePath);
+  }
+
+  async listDocuments(projectId, collection) {
+    const dir = this.collectionDir(projectId, collection);
+
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+
+      return entries
+        .filter(
+          (entry) =>
+            entry.isFile() &&
+            entry.name.endsWith(".json") &&
+            !entry.name.endsWith(".tmp"),
+        )
+        .map((entry) => entry.name.replace(/\.json$/, ""))
+        .sort();
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return [];
+      }
+
+      throw error;
+    }
+  }
+
+  async getDocument(projectId, collection, id) {
+    const filePath = this.documentPath(projectId, collection, id);
+    return this.readJson(filePath);
+  }
+
+  async saveDocument(projectId, collection, id, data) {
+    const filePath = this.documentPath(projectId, collection, id);
+    await this.writeJson(filePath, data);
   }
 
   async listProjects() {
-    if (!(await fileExists(this.projectsDir))) {
-      return [];
+    const projectsDir = path.join(this.dataDir, "projects");
+
+    try {
+      const entries = await fs.readdir(projectsDir, {
+        withFileTypes: true,
+      });
+
+      return entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .filter((id) => SAFE_ID.test(id))
+        .sort();
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return [];
+      }
+
+      throw error;
     }
-
-    const entries = await fs.readdir(this.projectsDir, {
-      withFileTypes: true,
-    });
-
-    return entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
   }
 
   async getProject(projectId) {
-    const filePath = this.getProjectFile(projectId);
-
-    if (!(await fileExists(filePath))) {
-      return null;
-    }
-
-    return readJson(filePath);
+    return this.readJson(path.join(this.projectDir(projectId), "project.json"));
   }
 
   async listMaps(projectId) {
-    return this.listCollection(projectId, "maps");
+    return this.listDocuments(projectId, "maps");
   }
 
   async getMap(projectId, mapId) {
@@ -110,7 +127,7 @@ export class FileContentStore extends ContentStore {
   }
 
   async listEntityDatasets(projectId) {
-    return this.listCollection(projectId, "entity-datasets");
+    return this.listDocuments(projectId, "entity-datasets");
   }
 
   async getEntityDataset(projectId, datasetId) {
@@ -121,38 +138,15 @@ export class FileContentStore extends ContentStore {
     return this.saveDocument(projectId, "entity-datasets", datasetId, data);
   }
 
-  async listCollection(projectId, collection) {
-    const directory = this.getCollectionDir(projectId, collection);
-
-    if (!(await fileExists(directory))) {
-      return [];
-    }
-
-    const entries = await fs.readdir(directory, {
-      withFileTypes: true,
-    });
-
-    return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-      .map((entry) => entry.name.replace(/\.json$/, ""))
-      .sort();
+  async listTemplates(projectId) {
+    return this.listDocuments(projectId, "templates");
   }
 
-  async getDocument(projectId, collection, documentId) {
-    const filePath = this.getDocumentFile(projectId, collection, documentId);
-
-    if (!(await fileExists(filePath))) {
-      return null;
-    }
-
-    return readJson(filePath);
+  async getTemplate(projectId, templateId) {
+    return this.getDocument(projectId, "templates", templateId);
   }
 
-  async saveDocument(projectId, collection, documentId, data) {
-    const filePath = this.getDocumentFile(projectId, collection, documentId);
-
-    await writeJsonAtomic(filePath, data);
-
-    return data;
+  async saveTemplate(projectId, templateId, data) {
+    return this.saveDocument(projectId, "templates", templateId, data);
   }
 }

@@ -6,231 +6,238 @@ import { FileContentStore } from "./FileContentStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const PORT = Number(process.env.PORT || 4000);
-
-const HOST = process.env.HOST || "0.0.0.0";
-
-const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, "../data");
+const PORT = Number(process.env.PORT ?? 4000);
+const HOST = process.env.HOST ?? "0.0.0.0";
+const DATA_DIR = path.resolve(__dirname, process.env.DATA_DIR ?? "../data");
 
 const store = new FileContentStore(DATA_DIR);
 
-function sendJson(response, status, data) {
-  response.statusCode = status;
-
-  response.setHeader("Content-Type", "application/json");
-
-  response.end(JSON.stringify(data, null, 2));
+function sendJson(res, status, data) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(data));
 }
 
-function sendError(response, status, message) {
-  sendJson(response, status, {
+function sendError(res, status, message) {
+  sendJson(res, status, {
     error: message,
   });
 }
 
-function setCorsHeaders(response) {
-  response.setHeader("Access-Control-Allow-Origin", "*");
-
-  response.setHeader("Access-Control-Allow-Methods", "GET, PUT, OPTIONS");
-
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
-
-function readBody(request) {
+function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
 
-    request.on("data", (chunk) => {
+    req.on("data", (chunk) => {
       body += chunk;
+
+      // Prevent accidentally accepting huge request bodies.
+      if (body.length > 10 * 1024 * 1024) {
+        reject(new Error("Request body too large"));
+        req.destroy();
+      }
     });
 
-    request.on("end", () => resolve(body));
-
-    request.on("error", reject);
+    req.on("end", () => resolve(body));
+    req.on("error", reject);
   });
 }
 
-async function readJsonBody(request) {
-  const body = await readBody(request);
+async function readJsonBody(req) {
+  const body = await readBody(req);
 
   if (!body.trim()) {
-    throw new Error("Request body is required");
+    throw new Error("Request body is empty");
   }
 
-  return JSON.parse(body);
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error("Request body is not valid JSON");
+  }
 }
 
-function getPathParts(request) {
-  const url = new URL(request.url, "http://localhost");
-
-  return url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+function setCorsHeaders(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, PUT, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-async function handleRequest(request, response) {
-  setCorsHeaders(response);
+function assertSafeId(id, label) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new Error(`Invalid ${label}`);
+  }
+}
 
-  if (request.method === "OPTIONS") {
-    response.statusCode = 204;
-    response.end();
+async function handleRequest(req, res) {
+  setCorsHeaders(res);
+
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    res.end();
     return;
   }
 
-  const parts = getPathParts(request);
+  const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
+  const parts = url.pathname.split("/").filter(Boolean);
 
-  // GET /health
-
-  if (request.method === "GET" && parts.length === 1 && parts[0] === "health") {
-    sendJson(response, 200, {
+  /*
+   * GET /health
+   */
+  if (req.method === "GET" && url.pathname === "/health") {
+    sendJson(res, 200, {
       ok: true,
     });
-
     return;
   }
 
-  // Everything else starts with:
-  //
-  // /api/projects
-
-  if (parts[0] !== "api" || parts[1] !== "projects") {
-    sendError(response, 404, "Not found");
-
+  /*
+   * Everything below is /api/...
+   */
+  if (parts[0] !== "api") {
+    sendError(res, 404, "Not found");
     return;
   }
 
-  // GET /api/projects
-
-  if (request.method === "GET" && parts.length === 2) {
+  /*
+   * GET /api/projects
+   */
+  if (req.method === "GET" && parts.length === 2 && parts[1] === "projects") {
     const projects = await store.listProjects();
 
-    sendJson(response, 200, projects);
-
+    sendJson(res, 200, projects);
     return;
   }
 
-  const projectId = parts[2];
-
-  if (!projectId) {
-    sendError(response, 400, "Project ID is required");
-
+  /*
+   * Everything else requires:
+   *
+   * /api/projects/:projectId/...
+   */
+  if (parts[1] !== "projects" || !parts[2]) {
+    sendError(res, 404, "Not found");
     return;
   }
 
-  // GET /api/projects/:projectId
+  const projectId = decodeURIComponent(parts[2]);
 
-  if (request.method === "GET" && parts.length === 3) {
+  assertSafeId(projectId, "project ID");
+
+  /*
+   * GET /api/projects/:projectId
+   */
+  if (parts.length === 3 && req.method === "GET") {
     const project = await store.getProject(projectId);
 
     if (!project) {
-      sendError(response, 404, "Project not found");
-
+      sendError(res, 404, "Project not found");
       return;
     }
 
-    sendJson(response, 200, project);
+    sendJson(res, 200, project);
+    return;
+  }
 
+  if (parts.length < 4) {
+    sendError(res, 404, "Not found");
     return;
   }
 
   const collection = parts[3];
-  const documentId = parts[4];
 
-  // Maps
+  const collections = {
+    maps: {
+      list: (projectId) => store.listMaps(projectId),
+      get: (projectId, id) => store.getMap(projectId, id),
+      save: (projectId, id, data) => store.saveMap(projectId, id, data),
+    },
 
-  if (collection === "maps") {
-    if (request.method === "GET" && !documentId) {
-      const maps = await store.listMaps(projectId);
+    "entity-datasets": {
+      list: (projectId) => store.listEntityDatasets(projectId),
+      get: (projectId, id) => store.getEntityDataset(projectId, id),
+      save: (projectId, id, data) =>
+        store.saveEntityDataset(projectId, id, data),
+    },
 
-      sendJson(response, 200, maps);
+    templates: {
+      list: (projectId) => store.listTemplates(projectId),
+      get: (projectId, id) => store.getTemplate(projectId, id),
+      save: (projectId, id, data) => store.saveTemplate(projectId, id, data),
+    },
+  };
 
-      return;
-    }
+  const handler = collections[collection];
 
-    if (request.method === "GET" && documentId) {
-      const map = await store.getMap(projectId, documentId);
+  if (!handler) {
+    sendError(res, 404, "Unknown collection");
+    return;
+  }
 
-      if (!map) {
-        sendError(response, 404, "Map not found");
+  /*
+   * GET /api/projects/:projectId/:collection
+   */
+  if (parts.length === 4 && req.method === "GET") {
+    const documents = await handler.list(projectId);
 
+    sendJson(res, 200, documents);
+    return;
+  }
+
+  /*
+   * GET/PUT
+   * /api/projects/:projectId/:collection/:documentId
+   */
+  if (parts.length === 5) {
+    const documentId = decodeURIComponent(parts[4]);
+
+    assertSafeId(documentId, "document ID");
+
+    if (req.method === "GET") {
+      const document = await handler.get(projectId, documentId);
+
+      if (!document) {
+        sendError(res, 404, "Document not found");
         return;
       }
 
-      sendJson(response, 200, map);
-
+      sendJson(res, 200, document);
       return;
     }
 
-    if (request.method === "PUT" && documentId) {
-      const data = await readJsonBody(request);
+    if (req.method === "PUT") {
+      const data = await readJsonBody(req);
 
-      await store.saveMap(projectId, documentId, data);
+      await handler.save(projectId, documentId, data);
 
-      sendJson(response, 200, {
+      sendJson(res, 200, {
         ok: true,
       });
-
       return;
     }
   }
 
-  // Entity datasets
-
-  if (collection === "entity-datasets") {
-    if (request.method === "GET" && !documentId) {
-      const datasets = await store.listEntityDatasets(projectId);
-
-      sendJson(response, 200, datasets);
-
-      return;
-    }
-
-    if (request.method === "GET" && documentId) {
-      const dataset = await store.getEntityDataset(projectId, documentId);
-
-      if (!dataset) {
-        sendError(response, 404, "Entity dataset not found");
-
-        return;
-      }
-
-      sendJson(response, 200, dataset);
-
-      return;
-    }
-
-    if (request.method === "PUT" && documentId) {
-      const data = await readJsonBody(request);
-
-      await store.saveEntityDataset(projectId, documentId, data);
-
-      sendJson(response, 200, {
-        ok: true,
-      });
-
-      return;
-    }
-  }
-
-  sendError(response, 404, "Not found");
+  sendError(res, 404, "Not found");
 }
 
-const server = http.createServer(async (request, response) => {
+const server = http.createServer(async (req, res) => {
   try {
-    await handleRequest(request, response);
+    await handleRequest(req, res);
   } catch (error) {
     console.error(error);
 
-    if (error instanceof SyntaxError) {
-      sendError(response, 400, "Invalid JSON");
-
-      return;
+    if (!res.headersSent) {
+      sendError(
+        res,
+        error.message === "Request body is not valid JSON" ? 400 : 500,
+        error.message,
+      );
+    } else {
+      res.destroy();
     }
-
-    sendError(response, 500, error.message || "Internal server error");
   }
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Content server running on http://${HOST}:${PORT}`);
-
-  console.log(`Content directory: ${DATA_DIR}`);
+  console.log(`Content server listening on http://${HOST}:${PORT}`);
+  console.log(`Data directory: ${DATA_DIR}`);
 });
