@@ -1,0 +1,16 @@
+services:
+content-server:
+build: .
+container_name: raycaster-content-server
+
+ports:
+  - "4000:4000"
+
+environment:
+  PORT: 4000
+  DATA_DIR: /app/data
+
+volumes:
+  - /opt/raycaster-content:/app/data
+
+restart: unless-stopped
